@@ -1,0 +1,171 @@
+# Seed evaluation set: 22 questions with hand-written gold SQL.
+# Target for week 3 is 40, for week 8 is 200 (see the roadmap's band table).
+#
+# Writing gold SQL: return only the columns the question asks for, so the comparison is fair.
+# ordered: true only when the question itself asks for an order ("top 5", "highest").
+# Check top-N questions for ties at the cut-off: a tie makes the right answer ambiguous.
+# (q005 asked for the top 5 seller states until a three-way tie for 4th place failed a correct answer.)
+# gold_sql: null means the question is unanswerable and the correct behaviour is CANNOT_ANSWER.
+
+- id: q001
+  band: single_table
+  question: How many orders were placed in total?
+  gold_sql: select count(*) from fct_orders
+
+- id: q002
+  band: single_table
+  question: How many orders have been delivered?
+  gold_sql: select count(*) from fct_orders where order_status = 'delivered'
+
+- id: q003
+  band: single_table
+  question: What is the average review score across all reviewed orders?
+  gold_sql: select avg(avg_review_score) from fct_orders
+
+- id: q004
+  band: single_table
+  question: Which payment type is used most often as the primary payment type?
+  ordered: true
+  gold_sql: |
+    select primary_payment_type from fct_orders
+    group by primary_payment_type order by count(*) desc limit 1
+
+- id: q005
+  band: single_table
+  question: Which 3 states have the most sellers?
+  ordered: true
+  gold_sql: |
+    select state from dim_sellers
+    group by state order by count(*) desc limit 3
+
+- id: q006
+  band: joins
+  question: What were the top 5 product categories by revenue?
+  ordered: true
+  gold_sql: |
+    select p.category
+    from fct_order_items i join dim_products p using (product_id)
+    where i.order_status not in ('canceled', 'unavailable')
+    group by p.category order by sum(i.price) desc limit 5
+
+- id: q007
+  band: joins
+  question: Which seller state generated the most revenue?
+  ordered: true
+  gold_sql: |
+    select s.state
+    from fct_order_items i join dim_sellers s using (seller_id)
+    where i.order_status not in ('canceled', 'unavailable')
+    group by s.state order by sum(i.price) desc limit 1
+
+- id: q008
+  band: joins
+  question: What is the average delivery time in days for each customer state? Show the 5 slowest states.
+  ordered: true
+  gold_sql: |
+    select c.state, avg(o.delivery_days)
+    from fct_orders o join dim_customers c using (customer_id)
+    where o.delivery_days is not null
+    group by c.state order by avg(o.delivery_days) desc limit 5
+
+- id: q009
+  band: joins
+  question: How many distinct orders included at least one product from the health_beauty category?
+  gold_sql: |
+    select count(distinct i.order_id)
+    from fct_order_items i join dim_products p using (product_id)
+    where p.category = 'health_beauty'
+
+- id: q010
+  band: joins
+  question: How many unique customers (real people, not customer records) placed orders from the state of SP?
+  gold_sql: |
+    select count(distinct c.customer_unique_id)
+    from fct_orders o join dim_customers c using (customer_id)
+    where c.state = 'SP'
+
+- id: q011
+  band: time_relative
+  question: How many orders were placed in each year?
+  gold_sql: |
+    select year(purchased_at), count(*) from fct_orders group by 1
+
+- id: q012
+  band: time_relative
+  question: What was the revenue for each month of 2017? Return the month number and the revenue.
+  gold_sql: |
+    select month(order_date), sum(price)
+    from fct_order_items
+    where year(order_date) = 2017 and order_status not in ('canceled', 'unavailable')
+    group by 1
+
+- id: q013
+  band: time_relative
+  question: In which year and month number were the most orders placed?
+  ordered: true
+  gold_sql: |
+    select year(purchased_at), month(purchased_at)
+    from fct_orders group by 1, 2 order by count(*) desc limit 1
+
+- id: q021
+  band: time_relative
+  question: What was the revenue last month?
+  gold_sql: |
+    select sum(price) from fct_order_items
+    where order_status not in ('canceled', 'unavailable')
+      and order_date >= date '2018-08-01' and order_date < date '2018-09-01'
+
+- id: q022
+  band: time_relative
+  question: How many orders were placed this year?
+  gold_sql: select count(*) from fct_orders where year(order_date) = 2018
+
+- id: q014
+  band: window
+  question: For each year, which product category had the highest revenue?
+  gold_sql: |
+    with by_year as (
+        select year(i.order_date) as yr, p.category, sum(i.price) as revenue
+        from fct_order_items i join dim_products p using (product_id)
+        where i.order_status not in ('canceled', 'unavailable')
+        group by 1, 2
+    )
+    select yr, category from (
+        select *, row_number() over (partition by yr order by revenue desc) as rn from by_year
+    ) where rn = 1
+
+- id: q015
+  band: window
+  question: Show the running total of orders by year, as year and cumulative order count.
+  gold_sql: |
+    select yr, sum(n) over (order by yr)
+    from (select year(purchased_at) as yr, count(*) as n from fct_orders group by 1)
+
+- id: q016
+  band: metric
+  question: What is the average order value?
+  gold_sql: select avg(payment_value) from fct_orders where order_status = 'delivered'
+
+- id: q017
+  band: metric
+  question: What is the late delivery rate?
+  gold_sql: |
+    select 100.0 * avg(case when is_late then 1 else 0 end)
+    from fct_orders where order_status = 'delivered' and is_late is not null
+
+- id: q018
+  band: metric
+  question: What was the GMV in 2018?
+  gold_sql: |
+    select sum(price + freight_value) from fct_order_items
+    where year(order_date) = 2018 and order_status not in ('canceled', 'unavailable')
+
+- id: q019
+  band: unanswerable
+  question: What is the profit margin for each product category?
+  gold_sql: null
+
+- id: q020
+  band: unanswerable
+  question: How many people visited the website last month?
+  gold_sql: null

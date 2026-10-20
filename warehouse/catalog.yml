@@ -1,0 +1,95 @@
+# Descriptions of every mart table and column. The assistant reads this to write SQL,
+# so a vague description here becomes a wrong query later: write them for a stranger.
+# sample_values: true -> the distinct values are looked up from the warehouse and shown to the model.
+
+tables:
+  fct_orders:
+    description: One row per order placed on the Olist marketplace (Brazil, 2016-2018).
+    columns:
+      order_id: Unique order identifier.
+      customer_id: The customer record for this order. Joins to dim_customers.customer_id.
+      order_status:
+        description: Lifecycle status of the order.
+        sample_values: true
+      purchased_at: Timestamp when the order was placed. Use this for all "when was it ordered" questions.
+      order_date: Date part of purchased_at.
+      delivered_at: Timestamp the customer received the order. Null if not delivered.
+      estimated_delivery_at: Delivery date promised to the customer at purchase.
+      item_count: Number of items in the order.
+      items_value: Sum of item prices in the order, excluding freight. In BRL.
+      freight_value: Sum of freight charges for the order. In BRL.
+      payment_value: Total amount the customer paid for the order, including freight. In BRL.
+      primary_payment_type:
+        description: Payment method of the first payment on the order.
+        sample_values: true
+      avg_review_score: Average review score for the order, 1 (worst) to 5 (best). Null if unreviewed.
+      delivery_days: Whole days from purchase to delivery. Null if not delivered.
+      is_late: True if delivered after the promised date. Null if not delivered.
+
+  fct_order_items:
+    description: One row per item within an order. Use for product, category and seller analysis.
+    columns:
+      order_id: The order this item belongs to. Joins to fct_orders.order_id.
+      item_seq: Position of the item within its order, starting at 1.
+      product_id: Joins to dim_products.product_id.
+      seller_id: Joins to dim_sellers.seller_id.
+      order_status:
+        description: Status of the parent order, copied here for convenience.
+        sample_values: true
+      purchased_at: Timestamp the parent order was placed.
+      order_date: Date the parent order was placed.
+      price: Item price in BRL, excluding freight.
+      freight_value: Freight charged for this item in BRL.
+
+  dim_products:
+    description: One row per product.
+    columns:
+      product_id: Unique product identifier.
+      category:
+        description: >-
+          Product category in English, lower_snake_case. 'unknown' means the product has no category;
+          two rare categories have no English name and appear in Portuguese.
+        sample_values: true
+      weight_g: Product weight in grams.
+
+  dim_customers:
+    description: >-
+      One row per customer record. Olist creates a new customer_id for every order, so count
+      distinct customer_unique_id to count real people.
+    columns:
+      customer_id: Customer record identifier, one per order.
+      customer_unique_id: Identifies the actual person across orders.
+      city: Customer city, lowercase.
+      state:
+        description: Two-letter Brazilian state code.
+        sample_values: true
+
+  dim_sellers:
+    description: One row per seller on the marketplace.
+    columns:
+      seller_id: Unique seller identifier.
+      city: Seller city, lowercase.
+      state:
+        description: Two-letter Brazilian state code.
+        sample_values: true
+
+# Canonical metric definitions. When a question names one of these, use exactly this definition.
+metrics:
+  revenue: >-
+    sum(fct_order_items.price) over orders whose order_status is not 'canceled' or 'unavailable'.
+    Excludes freight.
+  gmv: >-
+    Gross merchandise value: sum(fct_order_items.price + fct_order_items.freight_value) over orders
+    whose order_status is not 'canceled' or 'unavailable'.
+  average_order_value: avg(fct_orders.payment_value) over orders with order_status = 'delivered'.
+  late_delivery_rate: >-
+    Percentage (0-100) of delivered orders where is_late is true, among delivered orders where
+    is_late is not null.
+  active_customers: count(distinct dim_customers.customer_unique_id) with at least one order.
+
+# Things the warehouse does not contain. Questions about these cannot be answered.
+not_available:
+  - Product cost, profit or margin
+  - Website traffic, sessions or visitors
+  - Marketing spend or campaigns
+  - Inventory or stock levels
