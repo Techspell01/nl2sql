@@ -17,8 +17,16 @@ def connect_readonly() -> duckdb.DuckDBPyConnection:
         raise FileNotFoundError(
             f"No warehouse at {config.DB_PATH}. Run: python scripts/build_warehouse.py (or --sample)"
         )
-    # read_only blocks writes; disabling external access blocks read_csv('C:/...'), httpfs and extensions
-    return duckdb.connect(str(config.DB_PATH), read_only=True, config={"enable_external_access": False})
+    return duckdb.connect(
+        str(config.DB_PATH),
+        read_only=True,
+        config={
+            "enable_external_access": False,  # no files, no network, no extensions
+            "memory_limit": "1GB",
+            "threads": 2,
+            "lock_configuration": True,       # no SET can change any setting afterwards
+        },
+    )
 
 
 def run_query(sql: str, timeout_s: float = config.QUERY_TIMEOUT_S) -> pd.DataFrame:
