@@ -2,7 +2,8 @@
 
 The provider is set by NL2SQL_PROVIDER. Gemini and Groq are reached through their OpenAI-compatible
 endpoints with the `openai` client; Anthropic through its own SDK. The prompt is identical for all
-three, so comparing providers on the eval set is a fair experiment.
+three, so providers can be compared on the same eval set (effort and token budgets are set per provider
+and recorded with each run).
 
 If the primary provider is temporarily unavailable (overloaded, rate-limited, timed out, unreachable),
 the question is retried once on NL2SQL_FALLBACK. Configuration errors such as a bad key never fall back.
@@ -29,8 +30,10 @@ Otherwise reply with the query in a single ```sql code block and nothing else.
 {catalog}
 </warehouse>"""
 
-_SQL_BLOCK = re.compile(r"```(?:sql)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
-_CANNOT = re.compile(r"CANNOT_ANSWER:\s*(.+)", re.IGNORECASE)
+# Any language tag (sql, duckdb, SQL, none) is accepted; the tag is never part of the query.
+_SQL_BLOCK = re.compile(r"```[A-Za-z0-9_+-]*[ \t]*\r?\n(.*?)```", re.DOTALL)
+# Only at the start of a line, so a SQL comment that mentions it is not read as a refusal.
+_CANNOT = re.compile(r"^[ \t]*CANNOT_ANSWER:[ \t]*(.+)", re.IGNORECASE | re.MULTILINE)
 
 
 @dataclass
@@ -48,6 +51,10 @@ class Generation:
 
 class GenerationError(Exception):
     pass
+
+
+class ConfigError(GenerationError):
+    """A missing or rejected API key. Retrying or falling back cannot fix it."""
 
 
 class TransientError(GenerationError):
@@ -75,8 +82,8 @@ def _label(provider: str) -> str:
 def _require_key(provider: str) -> str:
     key = config.api_key(provider)
     if not key:
-        raise GenerationError(f"No API key for {_label(provider)}. Set {config.PROVIDERS[provider]['key_env']} "
-                              "in .env (see README).")
+        raise ConfigError(f"No API key for {_label(provider)}. Set {config.PROVIDERS[provider]['key_env']} "
+                          "in .env (see README).")
     return key
 
 
@@ -102,8 +109,8 @@ def _call_openai_compatible(provider: str, model: str, effort: str, system: str,
             max_completion_tokens=8000,
         )
     except openai.AuthenticationError as e:
-        raise GenerationError(f"The {_label(provider)} API key was rejected. "
-                              f"Check {config.PROVIDERS[provider]['key_env']} in .env.") from e
+        raise ConfigError(f"The {_label(provider)} API key was rejected. "
+                          f"Check {config.PROVIDERS[provider]['key_env']} in .env.") from e
     except openai.RateLimitError as e:
         raise TransientError(f"{_label(provider)} free-tier rate limit reached. Wait a minute and retry.") from e
     except openai.APITimeoutError as e:
@@ -119,13 +126,13 @@ def _call_openai_compatible(provider: str, model: str, effort: str, system: str,
     if choice.finish_reason == "length":
         raise GenerationError("The model ran out of output tokens before finishing the query.")
     usage = response.usage
-    return (choice.message.content or "").strip(), getattr(usage, "prompt_tokens", 0) or 0, \
-        getattr(usage, "completion_tokens", 0) or 0
+    return ((choice.message.content or "").strip(),
+            getattr(usage, "prompt_tokens", 0) or 0, getattr(usage, "completion_tokens", 0) or 0)
 
 
 # ---------- Anthropic: official SDK ----------
 
-_anthropic_client = None
+_anthropic_clients: dict = {}  # one client per retry setting, like the OpenAI-compatible clients above
 _FALLBACK_MODELS = ("claude-opus-5", "claude-fable-5")  # families that accept server-side refusal fallbacks
 
 
@@ -133,10 +140,9 @@ def _call_anthropic(provider: str, model: str, effort: str, system: str, questio
                     retries: int) -> tuple[str, int, int]:
     import anthropic
 
-    global _anthropic_client
     key = _require_key(provider)
-    if _anthropic_client is None:
-        _anthropic_client = anthropic.Anthropic(api_key=key, max_retries=retries)
+    if retries not in _anthropic_clients:
+        _anthropic_clients[retries] = anthropic.Anthropic(api_key=key, max_retries=retries, timeout=60)
     request = dict(
         model=model,
         max_tokens=16000,
@@ -148,12 +154,12 @@ def _call_anthropic(provider: str, model: str, effort: str, system: str, questio
         request["betas"] = ["server-side-fallback-2026-07-01"]
         request["fallbacks"] = "default"
     try:
-        response = _anthropic_client.beta.messages.create(**request)
+        response = _anthropic_clients[retries].beta.messages.create(**request)
     except anthropic.AuthenticationError as e:
-        raise GenerationError("The Anthropic API key was rejected. Check ANTHROPIC_API_KEY in .env.") from e
+        raise ConfigError("The Anthropic API key was rejected. Check ANTHROPIC_API_KEY in .env.") from e
     except anthropic.RateLimitError as e:
         raise TransientError("Anthropic rate limit reached. Wait a moment and retry.") from e
-    except anthropic.APIConnectionError as e:
+    except anthropic.APIConnectionError as e:  # includes timeouts
         raise TransientError("Could not reach the Anthropic API. Check your internet connection.") from e
     except anthropic.APIStatusError as e:
         if e.status_code >= 500:
