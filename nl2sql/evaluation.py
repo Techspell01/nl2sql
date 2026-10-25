@@ -2,13 +2,16 @@
 
 Rules, chosen deliberately and worth stating in the report:
 - Values are compared, not column names. `count(*)` and `as n_orders` are the same answer.
-- Column order does not matter. Each gold column is matched to a predicted column with the same values.
+- Column order does not matter. Each gold column is paired with a predicted column holding the same values;
+  every valid pairing is tried, because two columns can hold the same set of values in different alignments.
 - Extra predicted columns are allowed (a helpful count next to the asked-for name is not wrong).
   Missing columns are not.
 - Row order matters only when the question asks for an ordering (`ordered: true`, e.g. "top 5").
+  Give ordered gold queries a tie-breaker so the right answer is unambiguous.
 - Floats are rounded to 2 decimals; NaN, NaT and NULL are all treated as missing.
 """
 
+import itertools
 import math
 from collections import Counter
 from datetime import date, datetime
@@ -50,20 +53,21 @@ def results_match(pred: pd.DataFrame, gold: pd.DataFrame, ordered: bool = False)
         return False, f"{pred.shape[1]} columns, gold needs {gold.shape[1]}"
 
     gold_cols, pred_cols = _columns(gold), _columns(pred)
-    mapping, used = [], set()
-    for g in gold_cols:
-        target = g if ordered else _sort_key(g)
-        for j, p in enumerate(pred_cols):
-            if j not in used and (p if ordered else _sort_key(p)) == target:
-                mapping.append(j)
-                used.add(j)
-                break
-        else:
-            return False, "no predicted column matches a gold column's values"
+    key = (lambda v: v) if ordered else _sort_key
+    # every predicted column that could stand in for each gold column (identical values)
+    options = [[j for j, p in enumerate(pred_cols) if key(p) == key(g)] for g in gold_cols]
+    if any(not o for o in options):
+        if ordered and all(any(_sort_key(p) == _sort_key(g) for p in pred_cols) for g in gold_cols):
+            return False, "same values, different row order"
+        return False, "no predicted column matches a gold column's values"
 
-    pred_rows = [tuple(pred_cols[j][r] for j in mapping) for r in range(len(pred))]
     gold_rows = [tuple(col[r] for col in gold_cols) for r in range(len(gold))]
-    if ordered:
-        return (pred_rows == gold_rows), ("match" if pred_rows == gold_rows else "same values, different row order")
-    same = Counter(pred_rows) == Counter(gold_rows)
-    return same, ("match" if same else "columns match individually but rows differ")
+    # try each way of pairing gold columns with distinct predicted columns: pairing by values alone is
+    # ambiguous when two columns hold the same set of values in a different alignment
+    for combo in itertools.product(*options):
+        if len(set(combo)) < len(combo):
+            continue
+        pred_rows = [tuple(pred_cols[j][r] for j in combo) for r in range(len(pred))]
+        if (pred_rows == gold_rows) if ordered else (Counter(pred_rows) == Counter(gold_rows)):
+            return True, "match"
+    return False, ("same values, different row order" if ordered else "columns match individually but rows differ")
